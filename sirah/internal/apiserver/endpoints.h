@@ -5,6 +5,14 @@
 #include "pod_logs.h"
 #include "pod_exec.h"
 
+// Direct pod status update (for controller use)
+int endpoint_update_pod_status(const char* namespace, const char* pod_name,
+                              const char* phase, const char* container_name);
+
+// Remove finalizer from pod (called by controller after cleanup)
+int endpoint_remove_finalizer(const char* namespace, const char* pod_name,
+                             const char* finalizer_name);
+
 int endpoint_list_pods(const char* namespace, char* response_buffer, int* response_code);
 int endpoint_get_pod(const char* namespace, const char* name,
                      char* response_buffer, int* response_code);
@@ -159,5 +167,9 @@ int endpoint_get_event(const char* namespace, const char* name, char* response_b
 int endpoint_create_event(const char* namespace, const char* body,
                          char* response_buffer, int* response_code);
 int endpoint_delete_event(const char* namespace, const char* name, char* response_buffer, int* response_code);
+
+// Direct pod status update (for controller use)
+int endpoint_update_pod_status(const char* namespace, const char* pod_name,
+                              const char* phase, const char* container_name);
 
 #endif

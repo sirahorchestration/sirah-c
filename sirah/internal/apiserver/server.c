@@ -64,8 +64,8 @@ static enum MHD_Result request_callback(void* cls,
         state->processed = 0;
         *con_cls = (void*)state;
         
-        // Return MHD_YES to continue receiving data for POST/PUT requests
-        if (strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0) {
+        // Return MHD_YES to continue receiving data for methods that have a body
+        if (strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0 || strcmp(method, "PATCH") == 0) {
             return MHD_YES;
         }
     }
@@ -118,7 +118,13 @@ static enum MHD_Result request_callback(void* cls,
         return MHD_NO;
     }
 
-    MHD_add_response_header(response, "Content-Type", "application/json");
+    // Determine Content-Type based on request path
+    // Log endpoints return raw stream without structured content-type
+    // Other endpoints return JSON
+    if (strstr(url, "/log") == NULL) {
+        MHD_add_response_header(response, "Content-Type", "application/json");
+    }
+    // For log endpoints, don't set Content-Type - just return raw logs
     enum MHD_Result ret = MHD_queue_response(connection, response_code, response);
     MHD_destroy_response(response);
     

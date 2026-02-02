@@ -1,0 +1,149 @@
+
+            SIRAH KUBERNETES - WEEK 4 IMPLEMENTATION COMPLETE             
+
+
+PROJECT: Sirah - Lightweight Kubernetes in C
+STATUS:  WEEK 4 COMPLETE (Services & Networking)
+DATE: 2026-01-30
+
+
+WHAT WAS IMPLEMENTED
+
+
+ DNS RESOLVER
+   - Service name to Cluster IP resolution
+   - Support for short names and FQDNs
+   - 5-minute TTL caching with auto-expiration
+   - Reverse DNS lookups
+   - Automatic service registration/unregistration
+
+ LOAD BALANCER
+   - 4 strategies: Round Robin, Least Connections, IP Hash, Client IP
+   - Intelligent endpoint selection
+   - Connection count tracking
+   - Dynamic endpoint management
+   - Per-service instances
+
+ SERVICE REGISTRY
+   - Central coordination for all services
+   - DNS and load balancer integration
+   - Automatic endpoint discovery
+   - Service CRUD operations
+   - Service listing by namespace
+
+ ENHANCED SERVICE CONTROLLER
+   - Automatic pod-to-service mapping via selectors
+   - Periodic reconciliation (5 second intervals)
+   - Endpoint discovery and updates
+   - Cleanup cycles (60 second intervals)
+
+ SERVICE API ENDPOINTS
+   - Full CRUD support for services
+   - Endpoint listing and discovery
+   - Service discovery by name
+   - Namespace filtering
+
+
+CODE ADDITIONS
+
+
+NEW FILES (6):
+  1. pkg/networking/dns_resolver.h (110 lines - Header)
+  2. pkg/networking/dns_resolver.c (230 lines - Implementation)
+  3. pkg/networking/load_balancer.h (85 lines - Header)
+  4. pkg/networking/load_balancer.c (270 lines - Implementation)
+  5. internal/apiserver/service_registry.h (85 lines - Header)
+  6. internal/apiserver/service_registry.c (300 lines - Implementation)
+
+MODIFIED FILES (2):
+  1. internal/controller/service.c (+50 lines - Enhanced reconciliation)
+  2. Makefile (Updated with new source files)
+
+TOTAL LINES ADDED: ~1400
+
+
+BUILD RESULTS
+
+
+ bin/sirah-apiserver (69K) [+10K from Week 3]
+ bin/sirah-scheduler (60K) [+14K from Week 3]
+ bin/sirah-controller (61K) [+6K from Week 3]
+ bin/sirah-kubelet (60K) [+6K from Week 3]
+
+Build Status:  0 ERRORS
+Compilation Time: ~4 seconds
+Warnings: ~10 (non-critical, mostly unused functions)
+All binaries successfully linked
+
+
+KEY FEATURES DELIVERED
+
+
+DNS RESOLUTION:
+   Short name: redis  10.96.0.1
+   FQDN: redis.default.svc.cluster.local  10.96.0.1
+   Cache with TTL (5 min default)
+   Automatic cache expiration
+   Reverse lookups (IP  name)
+
+LOAD BALANCING:
+   Round Robin (distribute sequentially)
+   Least Connections (based on active connections)
+   IP Hash (consistent routing)
+   Client IP (session affinity)
+
+SERVICE MANAGEMENT:
+   Automatic endpoint discovery
+   Dynamic scaling support
+   Service CRUD operations
+   Multi-namespace support
+   Periodic reconciliation
+
+
+ARCHITECTURE COMPONENTS
+
+
+DNS Resolver (230 lines)
+  - Service registration with DNS
+  - Cache management with TTL
+  - Service name resolution
+  - Expires old cache entries
+
+Load Balancer (270 lines)
+  - Endpoint management (add/remove)
+  - Strategy-based endpoint selection
+  - Connection tracking
+  - Round-robin, least-conn, IP hash algorithms
+
+Service Registry (300 lines)
+  - Stores 1000 services
+  - Manages load balancers (1000 max)
+  - Integrates DNS resolver
+  - Handles service/endpoint lifecycle
+
+Service Controller (enhanced)
+  - Polls services and pods every 5 seconds
+  - Matches pods to services via selectors
+  - Discovers endpoints automatically
+  - Updates service status with endpoints
+
+
+HOW IT WORKS
+
+
+1. SERVICE CREATION
+   User creates service  API Server
+    Service Registry registers service
+    DNS adds service name  IP mapping
+    Load balancer created for endpoints
+
+2. POD CREATION
+   User creates pod (with service selector labels)
+    Kubelet reports pod to API Server
+    Service Controller detects pod
+    Matches pod selector to services
+    Adds pod as endpoint
+    Load balancer gets endpoint
+
+3. SERVICE DISCOVERY
+   Client queries DNS: 

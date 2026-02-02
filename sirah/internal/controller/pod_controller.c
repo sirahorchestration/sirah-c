@@ -175,10 +175,10 @@ static int pod_update_status_in_api(const char* namespace, const char* pod_name,
     
     // Build PATCH request to update pod status
     char url[512];
-    snprintf(url, sizeof(url), "%s/api/v1/namespaces/%s/pods/%s", 
+    snprintf(url, sizeof(url), "%s/api/v1/namespaces/%s/pods/%s/status", 
              api_server_url, namespace, pod_name);
     
-    // Create JSON patch for status update
+    // Create JSON body for status update
     char patch_data[256];
     snprintf(patch_data, sizeof(patch_data), 
              "{"
@@ -187,13 +187,45 @@ static int pod_update_status_in_api(const char* namespace, const char* pod_name,
              "}"
              "}", phase);
     
-    // Note: This would require PATCH support in the API server
-    // For now, just log it
-    fprintf(stderr, "[POD CONTROLLER] Status update (API PATCH not yet implemented): %s\n", 
-            patch_data);
-    fflush(stderr);
+    // Make HTTP PATCH request
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        fprintf(stderr, "[POD CONTROLLER] Failed to initialize curl\n");
+        fflush(stderr);
+        return -1;
+    }
     
-    return 0;
+    http_response_t response = {0};
+    response.data = (char*)malloc(MAX_API_RESPONSE);
+    response.capacity = MAX_API_RESPONSE;
+    response.size = 0;
+    
+    struct curl_slist* headers = NULL;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PATCH");
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, patch_data);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, pod_curl_write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)&response);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+    
+    CURLcode res = curl_easy_perform(curl);
+    
+    if (res != CURLE_OK) {
+        fprintf(stderr, "[POD CONTROLLER] PATCH request failed: %s\n", curl_easy_strerror(res));
+        fflush(stderr);
+    } else {
+        fprintf(stderr, "[POD CONTROLLER] PATCH request succeeded: %s\n", response.data);
+        fflush(stderr);
+    }
+    
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    free(response.data);
+    
+    return res == CURLE_OK ? 0 : -1;
 }
 
 // Monitor QEMU process and return current status

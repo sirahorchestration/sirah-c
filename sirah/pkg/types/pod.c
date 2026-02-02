@@ -108,12 +108,18 @@ char* k8s_pod_to_json(k8s_pod_t* pod) {
         json_object_object_add(cs, "ready", json_object_new_boolean(pod->status.container_statuses[i].state == PHASE_RUNNING));
         json_object_object_add(cs, "restartCount", json_object_new_int(0));
         
+        // Properly structured state object
         json_object* state = json_object_new_object();
-        const char* state_str = "waiting";
-        if (pod->status.container_statuses[i].state == PHASE_RUNNING) state_str = "running";
-        json_object* state_obj = json_object_new_object();
-        json_object_object_add(state_obj, state_str, json_object_new_null());
-        json_object_object_add(cs, "state", state_obj);
+        if (pod->status.container_statuses[i].state == PHASE_RUNNING) {
+            // Running state
+            json_object_object_add(state, "running", json_object_new_object());
+        } else {
+            // Waiting state with reason
+            json_object* waiting_obj = json_object_new_object();
+            json_object_object_add(waiting_obj, "reason", json_object_new_string("ContainerCreating"));
+            json_object_object_add(state, "waiting", waiting_obj);
+        }
+        json_object_object_add(cs, "state", state);
         
         json_object_array_add(container_statuses, cs);
     }

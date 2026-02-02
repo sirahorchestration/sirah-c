@@ -8,6 +8,7 @@ set -e
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 BIN_DIR="$SCRIPT_DIR/bin"
 LOG_DIR="/tmp/sirah-logs"
+ETCD_ADDR="${ETCD_ADDR:-localhost:2379}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -53,25 +54,26 @@ echo -e "${GREEN}✓ Old processes cleaned${NC}"
 echo ""
 
 # Start etcd
-echo -e "${YELLOW}[2/5] Starting etcd...${NC}"
-rm -rf /tmp/sirah-etcd 2>/dev/null || true
-etcd --listen-client-urls http://localhost:2379 --advertise-client-urls http://localhost:2379 --data-dir /tmp/sirah-etcd > "$LOG_DIR/etcd.log" 2>&1 &
-ETCD_PID=$!
-sleep 2
-
-if ps -p $ETCD_PID > /dev/null; then
-    echo -e "${GREEN}✓ etcd started (PID: $ETCD_PID)${NC}"
-else
-    echo -e "${RED}✗ etcd failed to start${NC}"
-    cat "$LOG_DIR/etcd.log"
-    exit 1
-fi
-echo ""
+# NOTE: etcd is expected to be running as a system service
+# If running etcd manually, uncomment the section below
+# echo -e "${YELLOW}[1/4] Starting etcd...${NC}"
+# rm -rf /tmp/sirah-etcd 2>/dev/null || true
+# etcd --listen-client-urls http://$ETCD_ADDR --advertise-client-urls http://$ETCD_ADDR --data-dir /tmp/sirah-etcd > "$LOG_DIR/etcd.log" 2>&1 &
+# ETCD_PID=$!
+# sleep 2
+# if ps -p $ETCD_PID > /dev/null; then
+#     echo -e "${GREEN}✓ etcd started (PID: $ETCD_PID)${NC}"
+# else
+#     echo -e "${RED}✗ etcd failed to start${NC}"
+#     cat "$LOG_DIR/etcd.log"
+#     exit 1
+# fi
+# echo ""
 
 # Start API Server
-echo -e "${YELLOW}[3/5] Starting API Server...${NC}"
+echo -e "${YELLOW}[1/3] Starting API Server...${NC}"
 cd "$SCRIPT_DIR"
-stdbuf -oL "$BIN_DIR/sirah-apiserver" > "$LOG_DIR/apiserver.log" 2>&1 &
+stdbuf -oL "$BIN_DIR/sirah-apiserver" --etcd "$ETCD_ADDR" > "$LOG_DIR/apiserver.log" 2>&1 &
 APISERVER_PID=$!
 sleep 3
 
@@ -86,7 +88,7 @@ fi
 echo ""
 
 # Start Scheduler
-echo -e "${YELLOW}[4/5] Starting Scheduler...${NC}"
+echo -e "${YELLOW}[2/3] Starting Scheduler...${NC}"
 stdbuf -oL "$BIN_DIR/sirah-scheduler" > "$LOG_DIR/scheduler.log" 2>&1 &
 SCHEDULER_PID=$!
 sleep 2
@@ -101,7 +103,7 @@ fi
 echo ""
 
 # Start Controller Manager
-echo -e "${YELLOW}[5/5] Starting Controller Manager...${NC}"
+echo -e "${YELLOW}[3/3] Starting Controller Manager...${NC}"
 stdbuf -oL "$BIN_DIR/sirah-controller" > "$LOG_DIR/controller.log" 2>&1 &
 CONTROLLER_PID=$!
 sleep 2
@@ -120,10 +122,11 @@ echo -e "${GREEN}║          ✓ Sirah Cluster is Running!                     
 echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "${GREEN}Running Components:${NC}"
-echo "  [PID $ETCD_PID]       etcd           - Log: tail -f $LOG_DIR/etcd.log"
 echo "  [PID $APISERVER_PID]      API Server     - Log: tail -f $LOG_DIR/apiserver.log"
 echo "  [PID $SCHEDULER_PID]      Scheduler      - Log: tail -f $LOG_DIR/scheduler.log"
 echo "  [PID $CONTROLLER_PID]      Controller     - Log: tail -f $LOG_DIR/controller.log"
+echo ""
+echo -e "${BLUE}Note:${NC} etcd is running as a service (typically WSL system service)"
 echo ""
 echo -e "${BLUE}Test the cluster:${NC}"
 echo "  curl http://localhost:6443/api/v1/nodes"

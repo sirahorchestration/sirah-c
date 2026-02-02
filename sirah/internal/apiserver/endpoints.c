@@ -8,11 +8,10 @@
 #include "../storage/store.h"
 #include "../../pkg/types/service.h"
 
-// Global pod store (in-memory for MVP)
-static struct {
-    k8s_pod_t* pods[1000];
-    int count;
-} pod_store = {0};
+// Forward declarations for persistence
+extern int store_save_pod_to_etcd(k8s_pod_t* pod);
+extern int store_delete_pod_from_etcd(const char* namespace, const char* name);
+extern etcd_client_t* g_etcd_client;
 
 // Global node store
 static struct {
@@ -520,6 +519,15 @@ int endpoint_create_pod(const char* namespace, const char* body,
     fflush(stderr);
     if (pod_store.count < 1000) {
         pod_store.pods[pod_store.count++] = pod;
+        
+        // Persist to etcd if available
+        if (g_etcd_client) {
+            if (store_save_pod_to_etcd(pod) == 0) {
+                fprintf(stderr, "[DEBUG] Pod persisted to etcd: %s/%s\n", ns, pod_name);
+            } else {
+                fprintf(stderr, "[WARNING] Failed to persist pod to etcd\n");
+            }
+        }
     } else {
         snprintf(response_buffer, 16384, "{\"error\":\"pod store full\"}");
         *response_code = 500;
@@ -613,18 +621,47 @@ int endpoint_delete_pod(const char* namespace, const char* pod_name,
     for (int i = 0; i < pod_store.count; i++) {
         if (strcmp(pod_store.pods[i]->metadata.name, pod_name) == 0 &&
             strcmp(pod_store.pods[i]->metadata.namespace, namespace) == 0) {
-            // Free pod memory
-            free(pod_store.pods[i]->metadata.name);
-            free(pod_store.pods[i]->metadata.namespace);
-            free(pod_store.pods[i]);
-
-            // Remove pod from store
-            for (int j = i; j < pod_store.count - 1; j++) {
-                pod_store.pods[j] = pod_store.pods[j + 1];
+            
+            // Check if finalizer already exists (pod already marked for deletion)
+            int has_finalizer = 0;
+            for (int f = 0; f < pod_store.pods[i]->metadata.num_finalizers; f++) {
+                if (strcmp(pod_store.pods[i]->metadata.finalizers[f], "sirah.io/cleanup") == 0) {
+                    has_finalizer = 1;
+                    break;
+                }
             }
-            pod_store.count--;
+            
+            if (!has_finalizer) {
+                // Add finalizer to mark pod for graceful cleanup
+                pod_store.pods[i]->metadata.finalizers = realloc(pod_store.pods[i]->metadata.finalizers,
+                                                                  (pod_store.pods[i]->metadata.num_finalizers + 1) * sizeof(char*));
+                pod_store.pods[i]->metadata.finalizers[pod_store.pods[i]->metadata.num_finalizers] = 
+                    malloc(20);
+                strcpy(pod_store.pods[i]->metadata.finalizers[pod_store.pods[i]->metadata.num_finalizers], 
+                       "sirah.io/cleanup");
+                pod_store.pods[i]->metadata.num_finalizers++;
+                
+                // Set deletion timestamp
+                pod_store.pods[i]->metadata.deletion_timestamp = time(NULL);
+                
+                // Update phase to Terminating
+                pod_store.pods[i]->status.phase = PHASE_TERMINATING;
+                
+                fprintf(stderr, "[ENDPOINTS] Pod marked for deletion: %s/%s (finalizer added)\n", 
+                        namespace, pod_name);
+                
+                // Persist deletion state to etcd
+                if (g_etcd_client) {
+                    if (store_save_pod_to_etcd(pod_store.pods[i]) == 0) {
+                        fprintf(stderr, "[DEBUG] Pod deletion state persisted to etcd: %s/%s\n", 
+                                namespace, pod_name);
+                    } else {
+                        fprintf(stderr, "[WARNING] Failed to persist pod deletion state to etcd\n");
+                    }
+                }
+            }
 
-            strcpy(response_buffer, "{\"status\":\"deleted\"}");
+            strcpy(response_buffer, "{\"status\":\"terminating\"}");
             *response_code = 200;
             return 0;
         }
@@ -853,6 +890,16 @@ int endpoint_pod_status(const char* namespace, const char* pod_name, const char*
             
             if (!pod_store.pods[i]->status.start_time) {
                 pod_store.pods[i]->status.start_time = time(NULL);
+            }
+            
+            // Persist status update to etcd
+            if (g_etcd_client) {
+                if (store_save_pod_to_etcd(pod_store.pods[i]) == 0) {
+                    fprintf(stderr, "[DEBUG] Pod status persisted to etcd: %s/%s -> %s\n", 
+                            namespace, pod_name, phase);
+                } else {
+                    fprintf(stderr, "[WARNING] Failed to persist pod status to etcd\n");
+                }
             }
             
             // Build response
@@ -1805,4 +1852,62 @@ int endpoint_delete_event(const char* namespace, const char* name,
     strcpy(response_buffer, "");
     *response_code = 204;
     return 0;
+}
+
+// Remove finalizer from pod (called by controller after cleanup)
+// If no finalizers remain, the pod is automatically deleted
+int endpoint_remove_finalizer(const char* namespace, const char* pod_name,
+                             const char* finalizer_name) {
+    for (int i = 0; i < pod_store.count; i++) {
+        if (strcmp(pod_store.pods[i]->metadata.name, pod_name) == 0 &&
+            strcmp(pod_store.pods[i]->metadata.namespace, namespace) == 0) {
+            
+            // Find and remove the finalizer
+            int found = 0;
+            for (int f = 0; f < pod_store.pods[i]->metadata.num_finalizers; f++) {
+                if (strcmp(pod_store.pods[i]->metadata.finalizers[f], finalizer_name) == 0) {
+                    // Remove this finalizer
+                    free(pod_store.pods[i]->metadata.finalizers[f]);
+                    
+                    // Shift remaining finalizers
+                    for (int j = f; j < pod_store.pods[i]->metadata.num_finalizers - 1; j++) {
+                        pod_store.pods[i]->metadata.finalizers[j] = pod_store.pods[i]->metadata.finalizers[j + 1];
+                    }
+                    pod_store.pods[i]->metadata.num_finalizers--;
+                    found = 1;
+                    break;
+                }
+            }
+            
+            if (!found) {
+                fprintf(stderr, "[ENDPOINTS] Finalizer not found: %s/%s ← %s\n", 
+                        namespace, pod_name, finalizer_name);
+                return -1;
+            }
+            
+            // If no finalizers remain, delete the pod
+            if (pod_store.pods[i]->metadata.num_finalizers == 0) {
+                fprintf(stderr, "[ENDPOINTS] All finalizers removed, deleting pod: %s/%s\n", 
+                        namespace, pod_name);
+                
+                // Free pod memory and remove from store
+                free(pod_store.pods[i]->metadata.name);
+                free(pod_store.pods[i]->metadata.namespace);
+                free(pod_store.pods[i]);
+                
+                for (int j = i; j < pod_store.count - 1; j++) {
+                    pod_store.pods[j] = pod_store.pods[j + 1];
+                }
+                pod_store.count--;
+            } else {
+                fprintf(stderr, "[ENDPOINTS] Finalizer removed: %s/%s ← %s (%d remaining)\n", 
+                        namespace, pod_name, finalizer_name, pod_store.pods[i]->metadata.num_finalizers);
+            }
+            
+            return 0;
+        }
+    }
+    
+    fprintf(stderr, "[ENDPOINTS] Pod not found for finalizer removal: %s/%s\n", namespace, pod_name);
+    return -1;
 }

@@ -123,8 +123,19 @@ int qemu_spawn(vm_spec_t* spec) {
         // Child process - setup file descriptors and exec QEMU
         
         // Open log file for stdout/stderr
-        char log_file[256];
-        snprintf(log_file, sizeof(log_file), "/tmp/qemu-%s.log", spec->id);
+        // Write directly to final pod logs location: /tmp/sirah-logs/pods/{namespace}/{pod}/{container}.log
+        char log_dir[512];
+        char log_file[512];
+        snprintf(log_dir, sizeof(log_dir), "/tmp/sirah-logs/pods/%s/%s", spec->namespace, spec->pod_name);
+        snprintf(log_file, sizeof(log_file), "%s/app.log", log_dir);
+        
+        // Create directories if they don't exist
+        mkdir("/tmp/sirah-logs", 0755);
+        mkdir("/tmp/sirah-logs/pods", 0755);
+        char ns_dir[512];
+        snprintf(ns_dir, sizeof(ns_dir), "/tmp/sirah-logs/pods/%s", spec->namespace);
+        mkdir(ns_dir, 0755);
+        mkdir(log_dir, 0755);
         
         int log_fd = open(log_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (log_fd < 0) {
@@ -144,12 +155,17 @@ int qemu_spawn(vm_spec_t* spec) {
         char mem_str[32];
         char cpus_str[32];
         char name_str[256];
+        char serial_socket[512];
         
         snprintf(mem_str, sizeof(mem_str), "%d", memory);
         snprintf(cpus_str, sizeof(cpus_str), "%d", cpus);
         snprintf(name_str, sizeof(name_str), "%s", spec->id);
+        snprintf(serial_socket, sizeof(serial_socket), "/tmp/qemu-serial-%s.sock", spec->id);
         
-        // Build command: qemu-system-x86_64 -kernel <image> -m <memory> -smp <cpus> -nographic -name <name>
+        // Build command with serial console for log capture:
+        // -serial stdio: Output to stdout (captured in log file)
+        // -serial unix:socket: Output to Unix socket (for advanced log streaming)
+        // -monitor: QEMU monitor on stdio for control
         const char* argv[] = {
             "qemu-system-x86_64",
             "-kernel", image_path,
@@ -157,11 +173,15 @@ int qemu_spawn(vm_spec_t* spec) {
             "-smp", cpus_str,
             "-nographic",
             "-name", name_str,
+            "-serial", "stdio",              // Serial output to stdout (captured in log)
+            "-monitor", "none",              // Disable QEMU monitor to avoid mixing output
             NULL
         };
         
-        printf("[QEMU] Child execing: qemu-system-x86_64 -kernel %s -m %s -smp %s -nographic -name %s\n",
+        printf("[QEMU] Child execing with log capture:\n");
+        printf("  qemu-system-x86_64 -kernel %s -m %s -smp %s -nographic -name %s\n", 
                image_path, mem_str, cpus_str, name_str);
+        printf("  -serial stdio (logs to %s/%s/app.log)\n", log_dir, spec->pod_name);
         fflush(stdout);
         
         // Execute QEMU
