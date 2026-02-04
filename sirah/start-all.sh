@@ -11,6 +11,14 @@ LOG_DIR="/tmp/sirah-logs"
 ETCD_ADDR="${ETCD_ADDR:-http://localhost:2379}"
 ETCD_PORT="${ETCD_PORT:-2379}"
 
+# Ensure log directory exists
+mkdir -p "$LOG_DIR"
+
+# Redirect all script output to log file while also showing it on terminal
+SCRIPT_LOG="$LOG_DIR/start-all.log"
+exec > >(tee -a "$SCRIPT_LOG")
+exec 2>&1
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -45,7 +53,7 @@ echo -e "${BLUE}╚════════════════════�
 echo ""
 
 # Check prerequisites
-echo -e "${YELLOW}[0/4] Checking prerequisites...${NC}"
+echo -e "${YELLOW}[0/5] Checking prerequisites...${NC}"
 MISSING=0
 
 # Check if binaries exist
@@ -76,7 +84,7 @@ echo -e "${GREEN}✓ Prerequisites OK${NC}"
 echo ""
 
 # Kill any existing processes
-echo -e "${YELLOW}[1/4] Cleaning up old processes...${NC}"
+echo -e "${YELLOW}[1/5] Cleaning up old processes...${NC}"
 pkill -f "sirah-apiserver" 2>/dev/null || true
 pkill -f "sirah-scheduler" 2>/dev/null || true
 pkill -f "sirah-controller" 2>/dev/null || true
@@ -103,7 +111,7 @@ echo ""
 # echo ""
 
 # Start API Server
-echo -e "${YELLOW}[2/4] Starting API Server...${NC}"
+echo -e "${YELLOW}[2/5] Starting API Server...${NC}"
 cd "$SCRIPT_DIR"
 stdbuf -oL "$BIN_DIR/sirah-apiserver" --etcd "$ETCD_ADDR" > "$LOG_DIR/apiserver.log" 2>&1 &
 APISERVER_PID=$!
@@ -120,7 +128,7 @@ fi
 echo ""
 
 # Start Scheduler
-echo -e "${YELLOW}[3/4] Starting Scheduler...${NC}"
+echo -e "${YELLOW}[3/5] Starting Scheduler...${NC}"
 stdbuf -oL "$BIN_DIR/sirah-scheduler" > "$LOG_DIR/scheduler.log" 2>&1 &
 SCHEDULER_PID=$!
 sleep 2
@@ -149,6 +157,21 @@ else
 fi
 echo ""
 
+# Start Kubelet
+echo -e "${YELLOW}[5/5] Starting Kubelet (control-plane node)...${NC}"
+stdbuf -oL "$BIN_DIR/sirah-kubelet" --node-name control-plane > "$LOG_DIR/kubelet.log" 2>&1 &
+KUBELET_PID=$!
+sleep 2
+
+if ps -p $KUBELET_PID > /dev/null; then
+    echo -e "${GREEN}✓ Kubelet started (PID: $KUBELET_PID)${NC}"
+else
+    echo -e "${RED}✗ Kubelet failed to start${NC}"
+    cat "$LOG_DIR/kubelet.log"
+    exit 1
+fi
+echo ""
+
 echo -e "${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║          ✓ Sirah Cluster is Running!                       ║${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
@@ -157,8 +180,10 @@ echo -e "${GREEN}Running Components:${NC}"
 echo "  [PID $APISERVER_PID]       API Server       - Log: tail -f $LOG_DIR/apiserver.log"
 echo "  [PID $SCHEDULER_PID]       Scheduler        - Log: tail -f $LOG_DIR/scheduler.log"
 echo "  [PID $CONTROLLER_PID]       Controller*      - Log: tail -f $LOG_DIR/controller.log"
+echo "  [PID $KUBELET_PID]       Kubelet          - Log: tail -f $LOG_DIR/kubelet.log"
 echo ""
-echo -e "${BLUE}* Controller is REQUIRED for pod logs (spawns QEMU VMs)${NC}"
+echo -e "${BLUE}* Controller is REQUIRED for pod lifecycle management${NC}"
+echo -e "${BLUE}* Kubelet is REQUIRED to spawn QEMU VMs for pods${NC}"
 echo ""
 echo -e "${BLUE}Pod Logs Location:${NC}"
 echo "  /tmp/sirah-logs/pods/{namespace}/{pod_name}/app.log"

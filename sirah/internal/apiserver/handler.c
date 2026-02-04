@@ -396,9 +396,71 @@ int api_handle_request(const char* method, const char* path, const char* body,
         // Check for bind endpoint
         if (strcmp(method, "POST") == 0 && strstr(path, "/bind")) {
             // POST /pods/{name}/bind (scheduler binding)
-            // Use etcd-backed patch endpoint for pod binding
-            const char* content_type = "application/json-patch+json";
-            endpoint_patch_pod_etcd(namespace, pod_name, body, content_type, response_buffer, response_code);
+            // Convert binding request to proper pod patch
+            json_object* binding_obj = json_tokener_parse(body);
+            if (!binding_obj) {
+                snprintf(response_buffer, 16384, "{\"error\":\"invalid binding request\"}");
+                *response_code = 400;
+                return 0;
+            }
+            
+            const char* node_name = json_object_get_string(json_object_object_get(binding_obj, "nodeName"));
+            if (!node_name) {
+                snprintf(response_buffer, 16384, "{\"error\":\"nodeName required in binding request\"}");
+                *response_code = 400;
+                json_object_put(binding_obj);
+                return 0;
+            }
+            
+            // Fetch current pod from etcd to get current state
+            char current_pod_buffer[16384] = {0};
+            int current_response_code = 0;
+            endpoint_get_pod_etcd(namespace, pod_name, current_pod_buffer, &current_response_code);
+            
+            if (current_response_code != 200 || strlen(current_pod_buffer) == 0) {
+                snprintf(response_buffer, 16384, "{\"error\":\"pod not found\"}");
+                *response_code = 404;
+                json_object_put(binding_obj);
+                return 0;
+            }
+            
+            // Parse current pod
+            json_object* current_pod = json_tokener_parse(current_pod_buffer);
+            if (!current_pod) {
+                snprintf(response_buffer, 16384, "{\"error\":\"failed to parse current pod\"}");
+                *response_code = 500;
+                json_object_put(binding_obj);
+                return 0;
+            }
+            
+            // Add nodeName to spec
+            json_object* spec = json_object_object_get(current_pod, "spec");
+            if (!spec) {
+                spec = json_object_new_object();
+                json_object_object_add(current_pod, "spec", spec);
+            }
+            json_object_object_add(spec, "nodeName", json_object_new_string(node_name));
+            
+            // Create patch object with just the updated spec
+            json_object* patch = json_object_new_object();
+            json_object_object_add(patch, "spec", json_object_get(spec));
+            
+            // Use PATCH handler to update in etcd
+            const char* patch_json = json_object_to_json_string(patch);
+            const char* content_type = "application/merge-patch+json";
+            
+            fprintf(stderr, "[API] BIND HANDLER: Binding %s/%s to node %s\n", namespace, pod_name, node_name);
+            fprintf(stderr, "[API] BIND HANDLER: Patch JSON = %s\n", patch_json);
+            fflush(stderr);
+            
+            endpoint_patch_pod_etcd(namespace, pod_name, patch_json, content_type, response_buffer, response_code);
+            
+            fprintf(stderr, "[API] BIND HANDLER: PATCH response code = %d\n", *response_code);
+            fflush(stderr);
+            
+            json_object_put(patch);
+            json_object_put(current_pod);
+            json_object_put(binding_obj);
             return 0;
         }
 

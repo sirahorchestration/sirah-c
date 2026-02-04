@@ -55,34 +55,32 @@ int main(int argc, char** argv) {
     }
     
     // Initialize scheduler integration
-    // TEMPORARILY DISABLED: Scheduler integration is causing segfaults
-    // printf("\n=== Initializing Scheduler ===\n");
-    // if (scheduler_integration_init() != 0) {
-    //     fprintf(stderr, "Warning: Failed to initialize scheduler\n");
-    // } else {
-    //     printf("✓ Scheduler integration initialized\n");
-    // }
+    printf("\n=== Initializing Scheduler ===\n");
+    if (scheduler_integration_init() != 0) {
+        fprintf(stderr, "Warning: Failed to initialize scheduler\n");
+    } else {
+        printf("✓ Scheduler integration initialized\n");
+    }
     
     if (api_server_init(port) != 0) {
         fprintf(stderr, "Failed to initialize API server\n");
-        // scheduler_integration_stop();
+        scheduler_integration_stop();
         etcd_manager_shutdown();
         store_shutdown_etcd();
         return 1;
     }
     
-    // Start scheduler control loop
-    // TEMPORARILY DISABLED: Scheduler integration is causing segfaults
-    // printf("\n=== Starting Scheduler Control Loop ===\n");
-    // if (scheduler_integration_start() != 0) {
-    //     fprintf(stderr, "Warning: Failed to start scheduler control loop\n");
-    // } else {
-    //     printf("✓ Scheduler control loop started\n");
-    // }
+    // Start scheduler control loop AFTER api_server_init() so server is listening
+    printf("\n=== Starting Scheduler Control Loop ===\n");
+    if (scheduler_integration_start() != 0) {
+        fprintf(stderr, "Warning: Failed to start scheduler control loop\n");
+    } else {
+        printf("✓ Scheduler control loop started\n");
+    }
     
     if (api_server_run() != 0) {
         fprintf(stderr, "API server error\n");
-        // scheduler_integration_stop();
+        scheduler_integration_stop();
         etcd_manager_shutdown();
         store_shutdown_etcd();
         return 1;

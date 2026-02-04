@@ -11,6 +11,15 @@
 # Note: Don't use set -e globally as we want to handle failures gracefully
 set +e
 
+# Setup logging
+LOG_DIR="/tmp/sirah-logs"
+mkdir -p "$LOG_DIR"
+SCRIPT_LOG="$LOG_DIR/test-qemu-log-streaming.log"
+
+# Redirect all script output to log file while also showing it on terminal
+exec > >(tee -a "$SCRIPT_LOG")
+exec 2>&1
+
 API_URL="http://localhost:6443"
 ADMIN_USER="admin:admin"
 MAX_RETRIES=10
@@ -342,4 +351,9 @@ echo "  curl -X DELETE -u $ADMIN_USER '$API_URL/api/v1/namespaces/$NAMESPACE/pod
 echo ""
 echo "  # Remove dynamic kernel copy:"
 echo "  rm -f $DYNAMIC_KERNEL"
+echo ""
+
+echo "=== Test Log ===" 
+echo "This test output was also saved to:"
+echo "  tail -f $SCRIPT_LOG"
 echo ""

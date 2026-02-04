@@ -1,6 +1,14 @@
 #!/bin/bash
 
-# Simple test for pod log streaming without scheduler
+# Start kubelet if not already running
+if ! pgrep -f "sirah-kubelet.*control-plane" > /dev/null; then
+    echo "Starting kubelet for control-plane node..."
+    cd /mnt/c/projects/sirah-c/sirah
+    ./bin/sirah-kubelet --node-name control-plane > /tmp/kubelet.log 2>&1 &
+    sleep 2
+fi
+
+# Simple test for pod log streaming
 API_URL="http://localhost:6443"
 ADMIN_USER="admin:admin"
 
