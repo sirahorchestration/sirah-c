@@ -13,15 +13,18 @@ int endpoint_update_pod_status(const char* namespace, const char* pod_name,
 int endpoint_remove_finalizer(const char* namespace, const char* pod_name,
                              const char* finalizer_name);
 
-int endpoint_list_pods(const char* namespace, char* response_buffer, int* response_code);
-int endpoint_get_pod(const char* namespace, const char* name,
-                     char* response_buffer, int* response_code);
-int endpoint_create_pod(const char* namespace, const char* body,
-                        char* response_buffer, int* response_code);
-int endpoint_delete_pod(const char* namespace, const char* name,
-                        char* response_buffer, int* response_code);
-int endpoint_bind_pod(const char* namespace, const char* pod_name, const char* body,
-                     char* response_buffer, int* response_code);int endpoint_get_pod_logs(const char* namespace, const char* pod_name,
+// DEPRECATED - Use etcd-backed endpoints instead (endpoints_etcd_integration.h)
+// int endpoint_list_pods(const char* namespace, char* response_buffer, int* response_code);
+// int endpoint_get_pod(const char* namespace, const char* name,
+//                      char* response_buffer, int* response_code);
+// int endpoint_create_pod(const char* namespace, const char* body,
+//                        char* response_buffer, int* response_code);
+// int endpoint_delete_pod(const char* namespace, const char* name,
+//                        char* response_buffer, int* response_code);
+// int endpoint_bind_pod(const char* namespace, const char* pod_name, const char* body,
+//                      char* response_buffer, int* response_code);
+
+int endpoint_get_pod_logs(const char* namespace, const char* pod_name,
                          const char* container_name, log_query_params_t* params,
                          char* response_buffer, int* response_code);
 int endpoint_exec_pod(const char* namespace, const char* pod_name,
@@ -31,8 +34,9 @@ int endpoint_get_node(const char* node_name, char* response_buffer, int* respons
 int endpoint_register_node(const char* body, char* response_buffer, int* response_code);
 int endpoint_node_heartbeat(const char* node_name, const char* body,
                            char* response_buffer, int* response_code);
-int endpoint_pod_status(const char* namespace, const char* pod_name, const char* body,
-                       char* response_buffer, int* response_code);
+// DEPRECATED - Use etcd-backed endpoints instead
+// int endpoint_pod_status(const char* namespace, const char* pod_name, const char* body,
+//                        char* response_buffer, int* response_code);
 int endpoint_pod_events(const char* namespace, const char* pod_name,
                        char* response_buffer, int* response_code);
 int endpoint_list_services(const char* namespace, char* response_buffer, int* response_code);
@@ -138,14 +142,41 @@ int endpoint_delete_cronjob(const char* namespace, const char* name,
                            char* response_buffer, int* response_code);
 
 // Patch endpoints for existing resources
-int endpoint_patch_pod(const char* namespace, const char* name, const char* body,
-                      const char* content_type, char* response_buffer, int* response_code);
+// DEPRECATED - Use etcd-backed endpoints instead
+// int endpoint_patch_pod(const char* namespace, const char* name, const char* body,
+//                       const char* content_type, char* response_buffer, int* response_code);
 int endpoint_patch_service(const char* namespace, const char* name, const char* body,
                           const char* content_type, char* response_buffer, int* response_code);
 int endpoint_patch_configmap(const char* namespace, const char* name, const char* body,
                             const char* content_type, char* response_buffer, int* response_code);
 int endpoint_patch_secret(const char* namespace, const char* name, const char* body,
                          const char* content_type, char* response_buffer, int* response_code);
+
+// etcd-backed Service endpoints (Phase 2C)
+int endpoint_create_service_etcd(const char* namespace, const char* body,
+                                 char* response_buffer, int* response_code);
+int endpoint_get_service_etcd(const char* namespace, const char* name,
+                              char* response_buffer, int* response_code);
+int endpoint_list_services_etcd(const char* namespace, char* response_buffer,
+                                int* response_code);
+int endpoint_patch_service_etcd(const char* namespace, const char* name, const char* body,
+                                const char* content_type, char* response_buffer,
+                                int* response_code);
+int endpoint_delete_service_etcd(const char* namespace, const char* name,
+                                 char* response_buffer, int* response_code);
+
+// etcd-backed Deployment endpoints (Phase 2C)
+int endpoint_create_deployment_etcd(const char* namespace, const char* body,
+                                    char* response_buffer, int* response_code);
+int endpoint_get_deployment_etcd(const char* namespace, const char* name,
+                                 char* response_buffer, int* response_code);
+int endpoint_list_deployments_etcd(const char* namespace, char* response_buffer,
+                                   int* response_code);
+int endpoint_patch_deployment_etcd(const char* namespace, const char* name, const char* body,
+                                   const char* content_type, char* response_buffer,
+                                   int* response_code);
+int endpoint_delete_deployment_etcd(const char* namespace, const char* name,
+                                    char* response_buffer, int* response_code);
 
 // Watch endpoints
 int endpoint_watch_pods(const char* namespace, const char* query_string,

@@ -66,6 +66,7 @@ char* k8s_pod_to_json(k8s_pod_t* pod) {
     json_object_object_add(meta, "name", json_object_new_string(pod->metadata.name));
     json_object_object_add(meta, "namespace", json_object_new_string(pod->metadata.namespace));
     json_object_object_add(meta, "uid", json_object_new_string(pod->metadata.uid ? pod->metadata.uid : ""));
+    json_object_object_add(meta, "resourceVersion", json_object_new_string(pod->metadata.resource_version ? pod->metadata.resource_version : ""));
     json_object_object_add(root, "metadata", meta);
     
     // Spec
@@ -148,6 +149,19 @@ k8s_pod_t* k8s_pod_from_json(const char* json_str) {
     const char* ns = json_object_get_string(json_object_object_get(meta, "namespace"));
     
     k8s_pod_t* pod = k8s_pod_new(name ? name : "unnamed", ns ? ns : "default");
+    
+    // Parse metadata fields
+    const char* uid = json_object_get_string(json_object_object_get(meta, "uid"));
+    if (uid) {
+        free(pod->metadata.uid);
+        pod->metadata.uid = strdup(uid);
+    }
+    
+    const char* resource_version = json_object_get_string(json_object_object_get(meta, "resourceVersion"));
+    if (resource_version) {
+        free(pod->metadata.resource_version);
+        pod->metadata.resource_version = strdup(resource_version);
+    }
     
     json_object* spec = json_object_object_get(root, "spec");
     if (spec) {

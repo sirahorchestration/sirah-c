@@ -10,11 +10,40 @@
 #include "watch.h"
 #include "pod_logs.h"
 #include "pod_exec.h"
+#include "validation.h"
+#include "rbac_middleware.h"
+#include "endpoints_etcd_integration.h"
+#include "controllers.h"
+#include "scheduler_integration.h"
+
+
+// NOTE: Accept header validation for protobuf compatibility is handled at the HTTP layer
+// in server.c (request_callback function). This ensures all API requests properly
+// return 406 Not Acceptable if the client requests application/vnd.kubernetes.protobuf encoding.
+// See: https://github.com/kubernetes/enhancements/tree/master/keps/sig-api-machinery/555-server-side-apply
 
 // Health check endpoint
 static int handle_healthz(char* response_buffer, int* response_code) {
     const char* response = "{\"status\":\"ok\"}";
     strcpy(response_buffer, response);
+    *response_code = 200;
+    return 0;
+}
+
+// Scheduler status endpoint
+static int handle_scheduler_status(char* response_buffer, int* response_code) {
+    scheduler_stats_t stats = scheduler_get_stats();
+    
+    json_object* root = json_object_new_object();
+    json_object_object_add(root, "status", json_object_new_string("active"));
+    json_object_object_add(root, "total_scheduled", json_object_new_int(stats.total_pods_scheduled));
+    json_object_object_add(root, "total_errors", json_object_new_int(stats.total_scheduling_errors));
+    json_object_object_add(root, "last_sync", json_object_new_int(stats.last_sync_time));
+    
+    const char* json_str = json_object_to_json_string(root);
+    strncpy(response_buffer, json_str, 16384 - 1);
+    json_object_put(root);
+    
     *response_code = 200;
     return 0;
 }
@@ -93,6 +122,11 @@ int api_handle_request(const char* method, const char* path, const char* body,
     // Health check
     if (strcmp(path, "/healthz") == 0) {
         return handle_healthz(response_buffer, response_code);
+    }
+    
+    // Scheduler status endpoint
+    if (strcmp(path, "/scheduler/status") == 0) {
+        return handle_scheduler_status(response_buffer, response_code);
     }
 
     // API discovery endpoints
@@ -219,6 +253,43 @@ int api_handle_request(const char* method, const char* path, const char* body,
         *response_code = 200;
         return 0;
     }
+    
+    // OpenAPI and Swagger documentation endpoints
+    if (strncmp(path, "/openapi", 8) == 0 || strncmp(path, "/docs", 5) == 0) {
+        extern int openapi_handle_request(const char* path, char* response_buffer, int* response_code);
+        return openapi_handle_request(path, response_buffer, response_code);
+    }
+    
+    // Dashboard endpoints (currently disabled due to build issues)
+    if (strncmp(path, "/dashboard", 10) == 0 || strncmp(path, "/api/dashboard", 14) == 0) {
+        const char* response = "{\"status\":\"dashboard_disabled\"}";
+        strcpy(response_buffer, response);
+        *response_code = 200;
+        return 0;
+    }
+    
+    // Metrics endpoint (Prometheus format)
+    if (strcmp(path, "/metrics") == 0) {
+        char metrics[8192] = "";
+        snprintf(metrics, sizeof(metrics),
+            "# HELP sirah_pods_total Total pods in cluster\n"
+            "# TYPE sirah_pods_total gauge\n"
+            "sirah_pods_total %d\n"
+            "# HELP sirah_api_requests_total Total API requests\n"
+            "# TYPE sirah_api_requests_total counter\n"
+            "sirah_api_requests_total 0\n"
+            "# HELP sirah_pod_creation_duration_seconds Pod creation latency\n"
+            "# TYPE sirah_pod_creation_duration_seconds histogram\n"
+            "sirah_pod_creation_duration_seconds_bucket{le=\"0.1\"} 0\n"
+            "sirah_pod_creation_duration_seconds_bucket{le=\"0.5\"} 0\n"
+            "sirah_pod_creation_duration_seconds_bucket{le=\"1.0\"} 0\n"
+            "sirah_pod_creation_duration_seconds_bucket{le=\"+Inf\"} 0\n",
+            0);  // Pod count from etcd - not implemented yet
+        
+        strncpy(response_buffer, metrics, 16383);
+        *response_code = 200;
+        return 0;
+    }
 
     if (strcmp(path, "/api/v1") == 0) {
         // Comprehensive resource list for kubectl api-resources
@@ -325,7 +396,9 @@ int api_handle_request(const char* method, const char* path, const char* body,
         // Check for bind endpoint
         if (strcmp(method, "POST") == 0 && strstr(path, "/bind")) {
             // POST /pods/{name}/bind (scheduler binding)
-            endpoint_bind_pod(namespace, pod_name, body, response_buffer, response_code);
+            // Use etcd-backed patch endpoint for pod binding
+            const char* content_type = "application/json-patch+json";
+            endpoint_patch_pod_etcd(namespace, pod_name, body, content_type, response_buffer, response_code);
             return 0;
         }
 
@@ -334,7 +407,59 @@ int api_handle_request(const char* method, const char* path, const char* body,
             // GET /pods/{name}/log
             log_query_params_t params = {0};
             parse_log_params(query_string, &params);
-            endpoint_get_pod_logs(namespace, pod_name, "", &params, response_buffer, response_code);
+            
+            // Extract container name from query params or use first container
+            char container_name[256] = {0};
+            
+            // Check for container=name query parameter
+            const char* container_param = strstr(query_string, "container=");
+            if (container_param) {
+                const char* value = container_param + strlen("container=");
+                const char* end = strchr(value, '&');
+                int len = end ? (end - value) : strlen(value);
+                strncpy(container_name, value, len > 255 ? 255 : len);
+            } else {
+                // Try to get first container from pod spec - fetch from etcd
+                int found = 0;
+                
+                // Fetch from etcd to get pod details
+                char pod_response[16384] = {0};
+                int dummy_code = 0;
+                endpoint_get_pod_etcd(namespace, pod_name, pod_response, &dummy_code);
+                    
+                if (dummy_code == 200 && strlen(pod_response) > 0) {
+                    json_object* pod_obj = json_tokener_parse(pod_response);
+                    if (pod_obj) {
+                        json_object* spec_obj = json_object_object_get(pod_obj, "spec");
+                        if (spec_obj) {
+                            json_object* containers_obj = json_object_object_get(spec_obj, "containers");
+                            if (containers_obj && json_object_is_type(containers_obj, json_type_array)) {
+                                if (json_object_array_length(containers_obj) > 0) {
+                                    json_object* first_container = json_object_array_get_idx(containers_obj, 0);
+                                    if (first_container) {
+                                        json_object* name_obj = json_object_object_get(first_container, "name");
+                                        if (name_obj) {
+                                            const char* name = json_object_get_string(name_obj);
+                                            if (name) {
+                                                strcpy(container_name, name);
+                                                found = 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        json_object_put(pod_obj);
+                    }
+                }
+            }
+            
+            // If still no container name, default to "app" (common Sirah convention)
+            if (strlen(container_name) == 0) {
+                strcpy(container_name, "app");
+            }
+            
+            endpoint_get_pod_logs(namespace, pod_name, container_name, &params, response_buffer, response_code);
             return 0;
         }
 
@@ -376,124 +501,12 @@ int api_handle_request(const char* method, const char* path, const char* body,
                 return -1;
             }
             
-            // Find the pod
-            int found = 0;
-            for (int i = 0; i < pod_store.count; i++) {
-                if (strcmp(pod_store.pods[i]->metadata.name, pod_name) == 0 &&
-                    strcmp(pod_store.pods[i]->metadata.namespace, namespace) == 0) {
-                    found = 1;
-                    
-                    // Extract status object from patch
-                    json_object* status_obj = NULL;
-                    if (json_object_object_get_ex(patch_obj, "status", &status_obj)) {
-                        // Update phase if provided
-                        json_object* phase_obj = NULL;
-                        if (json_object_object_get_ex(status_obj, "phase", &phase_obj)) {
-                            const char* new_phase = json_object_get_string(phase_obj);
-                            if (new_phase) {
-                                // Convert phase string to enum
-                                k8s_phase_t phase_enum = PHASE_PENDING;
-                                if (strcmp(new_phase, "Running") == 0) {
-                                    phase_enum = PHASE_RUNNING;
-                                } else if (strcmp(new_phase, "Succeeded") == 0) {
-                                    phase_enum = PHASE_SUCCEEDED;
-                                } else if (strcmp(new_phase, "Failed") == 0) {
-                                    phase_enum = PHASE_FAILED;
-                                }
-                                
-                                // Update pod phase
-                                pod_store.pods[i]->status.phase = phase_enum;
-                                
-                                // Also update container state to match pod phase
-                                for (int c = 0; c < pod_store.pods[i]->status.num_container_statuses; c++) {
-                                    pod_store.pods[i]->status.container_statuses[c].state = phase_enum;
-                                    
-                                    // Update reason based on phase transition
-                                    if (phase_enum == PHASE_RUNNING) {
-                                        if (pod_store.pods[i]->status.container_statuses[c].reason) {
-                                            free(pod_store.pods[i]->status.container_statuses[c].reason);
-                                        }
-                                        pod_store.pods[i]->status.container_statuses[c].reason = NULL;
-                                    }
-                                }
-                                
-                                fprintf(stderr, "[API] Updated pod %s/%s status to %s (containers updated too)\n", 
-                                    namespace, pod_name, new_phase);
-                                fflush(stderr);
-                            }
-                        }
-                    }
-                    
-                    // Build response with updated pod (same format as GET)
-                    json_object* response_pod = json_object_new_object();
-                    json_object_object_add(response_pod, "apiVersion", json_object_new_string("v1"));
-                    json_object_object_add(response_pod, "kind", json_object_new_string("Pod"));
-                    
-                    // Metadata
-                    json_object* metadata = json_object_new_object();
-                    json_object_object_add(metadata, "name", json_object_new_string(pod_store.pods[i]->metadata.name));
-                    json_object_object_add(metadata, "namespace", json_object_new_string(pod_store.pods[i]->metadata.namespace));
-                    json_object_object_add(response_pod, "metadata", metadata);
-                    
-                    // Status
-                    json_object* response_status = json_object_new_object();
-                    
-                    // Convert phase enum to string
-                    const char* phase_str = "Unknown";
-                    if (pod_store.pods[i]->status.phase == PHASE_PENDING) {
-                        phase_str = "Pending";
-                    } else if (pod_store.pods[i]->status.phase == PHASE_RUNNING) {
-                        phase_str = "Running";
-                    } else if (pod_store.pods[i]->status.phase == PHASE_SUCCEEDED) {
-                        phase_str = "Succeeded";
-                    } else if (pod_store.pods[i]->status.phase == PHASE_FAILED) {
-                        phase_str = "Failed";
-                    }
-                    
-                    json_object_object_add(response_status, "phase", 
-                        json_object_new_string(phase_str));
-                    
-                    json_object* container_statuses = json_object_new_array();
-                    for (int c = 0; c < pod_store.pods[i]->status.num_container_statuses; c++) {
-                        json_object* cs = json_object_new_object();
-                        json_object_object_add(cs, "name",
-                            json_object_new_string(pod_store.pods[i]->spec.containers[c].name));
-                        json_object_object_add(cs, "ready", json_object_new_boolean(
-                            pod_store.pods[i]->status.container_statuses[c].state == PHASE_RUNNING ? 1 : 0));
-                        json_object_object_add(cs, "restartCount", json_object_new_int(0));
-                        
-                        json_object* state = json_object_new_object();
-                        if (pod_store.pods[i]->status.container_statuses[c].state == PHASE_RUNNING) {
-                            json_object_object_add(state, "running", json_object_new_object());
-                        } else {
-                            json_object* waiting = json_object_new_object();
-                            const char* reason = pod_store.pods[i]->status.container_statuses[c].reason ? 
-                                                pod_store.pods[i]->status.container_statuses[c].reason : 
-                                                "ContainerCreating";
-                            json_object_object_add(waiting, "reason", json_object_new_string(reason));
-                            json_object_object_add(state, "waiting", waiting);
-                        }
-                        json_object_object_add(cs, "state", state);
-                        json_object_array_add(container_statuses, cs);
-                    }
-                    json_object_object_add(response_status, "containerStatuses", container_statuses);
-                    json_object_object_add(response_pod, "status", response_status);
-                    
-                    const char* json_str = json_object_to_json_string(response_pod);
-                    strcpy(response_buffer, json_str);
-                    *response_code = 200;
-                    json_object_put(response_pod);
-                    json_object_put(patch_obj);
-                    return 0;
-                }
-            }
-            
-            if (!found) {
-                *response_code = 404;
-                strcpy(response_buffer, "{\"error\":\"pod not found\"}");
-            }
+            // Use etcd-backed PATCH for status updates
+            // Status subresource updates go through etcd
+            const char* content_type = "application/json-patch+json";
+            endpoint_patch_pod_etcd(namespace, pod_name, body, content_type, response_buffer, response_code);
             json_object_put(patch_obj);
-            return -1;
+            return (*response_code == 200) ? 0 : -1;
         }
 
         // Watch endpoint
@@ -505,30 +518,131 @@ int api_handle_request(const char* method, const char* path, const char* body,
         if (strcmp(method, "GET") == 0) {
             if (strlen(pod_name) > 0) {
                 // GET /pods/{name}
-                endpoint_get_pod(namespace, pod_name, response_buffer, response_code);
+                endpoint_get_pod_etcd(namespace, pod_name, response_buffer, response_code);
             } else {
                 // GET /pods (list) - with filtering support
-                endpoint_list_pods(namespace, response_buffer, response_code);
+                endpoint_list_pods_etcd(namespace, response_buffer, response_code);
             }
             return 0;
         }
 
         if (strcmp(method, "POST") == 0) {
             // POST /pods (create)
-            endpoint_create_pod(namespace, body, response_buffer, response_code);
+            // Check RBAC authorization first (disabled for testing)
+            /*
+            rbac_policy_decision_t rbac_decision;
+            const char* auth_header = "";  // Would be extracted from headers in real implementation
+            int auth_result = rbac_middleware_check_request(
+                auth_header, method, path, "", "pods", "", namespace, &rbac_decision);
+            
+            if (auth_result != 0 && rbac_decision.decision == RBAC_DENY) {
+                // Authorization denied
+                char reason[512];
+                snprintf(reason, sizeof(reason), "User cannot create pods in namespace '%s': %s",
+                         namespace, rbac_decision.reason);
+                rbac_middleware_format_denial(auth_header, "pods", namespace, "create",
+                                            reason, response_buffer, response_code);
+                return 0;
+            }
+            */
+            
+            // Validate pod spec
+            json_object* pod_spec = json_tokener_parse(body);
+            if (pod_spec) {
+                json_object* metadata = json_object_object_get(pod_spec, "metadata");
+                json_object* spec = json_object_object_get(pod_spec, "spec");
+                
+                // Validate metadata
+                validation_result_t* meta_result = validate_pod_metadata(metadata);
+                // Validate spec
+                validation_result_t* spec_result = validate_pod_spec(spec);
+                
+                if (!meta_result->valid || !spec_result->valid) {
+                    // Return validation errors
+                    json_object* error_resp = json_object_new_object();
+                    json_object* errors_array = json_object_new_array();
+                    
+                    for (int i = 0; i < meta_result->error_count; i++) {
+                        json_object* err = json_object_new_object();
+                        json_object_object_add(err, "field", json_object_new_string(meta_result->errors[i]->field));
+                        json_object_object_add(err, "message", json_object_new_string(meta_result->errors[i]->message));
+                        json_object_array_add(errors_array, err);
+                    }
+                    for (int i = 0; i < spec_result->error_count; i++) {
+                        json_object* err = json_object_new_object();
+                        json_object_object_add(err, "field", json_object_new_string(spec_result->errors[i]->field));
+                        json_object_object_add(err, "message", json_object_new_string(spec_result->errors[i]->message));
+                        json_object_array_add(errors_array, err);
+                    }
+                    
+                    json_object_object_add(error_resp, "valid", json_object_new_boolean(0));
+                    json_object_object_add(error_resp, "errors", errors_array);
+                    
+                    const char* json_str = json_object_to_json_string_ext(error_resp, JSON_C_TO_STRING_PLAIN);
+                    strncpy(response_buffer, json_str, 16383);
+                    json_object_put(error_resp);
+                    validation_result_free(meta_result);
+                    validation_result_free(spec_result);
+                    json_object_put(pod_spec);
+                    *response_code = 400;
+                    return 0;
+                }
+                
+                validation_result_free(meta_result);
+                validation_result_free(spec_result);
+                json_object_put(pod_spec);
+            }
+            
+            endpoint_create_pod_etcd(namespace, body, response_buffer, response_code);
             return 0;
         }
 
         if (strcmp(method, "PATCH") == 0 && strlen(pod_name) > 0) {
             // PATCH /pods/{name}
+            // Check RBAC authorization first (disabled for testing)
+            /*
+            rbac_policy_decision_t rbac_decision;
+            const char* auth_header = "";  // Would be extracted from headers in real implementation
+            int auth_result = rbac_middleware_check_request(
+                auth_header, method, path, "", "pods", pod_name, namespace, &rbac_decision);
+            
+            if (auth_result != 0 && rbac_decision.decision == RBAC_DENY) {
+                // Authorization denied
+                char reason[512];
+                snprintf(reason, sizeof(reason), "User cannot patch pod '%s' in namespace '%s': %s",
+                         pod_name, namespace, rbac_decision.reason);
+                rbac_middleware_format_denial(auth_header, "pods", namespace, "patch",
+                                            reason, response_buffer, response_code);
+                return 0;
+            }
+            */
+            
             const char* content_type = "";  // Would be extracted from headers in real implementation
-            endpoint_patch_pod(namespace, pod_name, body, content_type, response_buffer, response_code);
+            endpoint_patch_pod_etcd(namespace, pod_name, body, content_type, response_buffer, response_code);
             return 0;
         }
 
         if (strcmp(method, "DELETE") == 0 && strlen(pod_name) > 0) {
             // DELETE /pods/{name}
-            endpoint_delete_pod(namespace, pod_name, response_buffer, response_code);
+            // Check RBAC authorization first (disabled for testing)
+            /*
+            rbac_policy_decision_t rbac_decision;
+            const char* auth_header = "";  // Would be extracted from headers in real implementation
+            int auth_result = rbac_middleware_check_request(
+                auth_header, method, path, "", "pods", pod_name, namespace, &rbac_decision);
+            
+            if (auth_result != 0 && rbac_decision.decision == RBAC_DENY) {
+                // Authorization denied
+                char reason[512];
+                snprintf(reason, sizeof(reason), "User cannot delete pod '%s' in namespace '%s': %s",
+                         pod_name, namespace, rbac_decision.reason);
+                rbac_middleware_format_denial(auth_header, "pods", namespace, "delete",
+                                            reason, response_buffer, response_code);
+                return 0;
+            }
+            */
+            
+            endpoint_delete_pod_etcd(namespace, pod_name, response_buffer, response_code);
             return 0;
         }
     }
@@ -609,26 +723,27 @@ int api_handle_request(const char* method, const char* path, const char* body,
         
         if (strcmp(method, "GET") == 0) {
             if (strlen(name) > 0) {
-                endpoint_get_service(namespace, name, response_buffer, response_code);
+                endpoint_get_service_etcd(namespace, name, response_buffer, response_code);
             } else {
-                endpoint_list_services(namespace, response_buffer, response_code);
+                endpoint_list_services_etcd(namespace, response_buffer, response_code);
             }
             return 0;
         }
         
         if (strcmp(method, "POST") == 0) {
-            endpoint_create_service(namespace, body, response_buffer, response_code);
+            endpoint_create_service_etcd(namespace, body, response_buffer, response_code);
             return 0;
         }
         
         if (strcmp(method, "PATCH") == 0 && strlen(name) > 0) {
-            const char* content_type = "";
-            endpoint_patch_service(namespace, name, body, content_type, response_buffer, response_code);
+            // PATCH /services/{name}
+            const char* content_type = "";  // Would be extracted from headers in real implementation
+            endpoint_patch_service_etcd(namespace, name, body, content_type, response_buffer, response_code);
             return 0;
         }
         
         if (strcmp(method, "DELETE") == 0 && strlen(name) > 0) {
-            endpoint_delete_service(namespace, name, response_buffer, response_code);
+            endpoint_delete_service_etcd(namespace, name, response_buffer, response_code);
             return 0;
         }
     }
@@ -673,15 +788,15 @@ int api_handle_request(const char* method, const char* path, const char* body,
         
         if (strcmp(method, "GET") == 0) {
             if (strlen(name) > 0) {
-                endpoint_get_deployment(namespace, name, response_buffer, response_code);
+                endpoint_get_deployment_etcd(namespace, name, response_buffer, response_code);
             } else {
-                endpoint_list_deployments(namespace, response_buffer, response_code);
+                endpoint_list_deployments_etcd(namespace, response_buffer, response_code);
             }
             return 0;
         }
         
         if (strcmp(method, "POST") == 0) {
-            endpoint_create_deployment(namespace, body, response_buffer, response_code);
+            endpoint_create_deployment_etcd(namespace, body, response_buffer, response_code);
             return 0;
         }
         
@@ -692,23 +807,36 @@ int api_handle_request(const char* method, const char* path, const char* body,
         
         if (strcmp(method, "PATCH") == 0 && strlen(name) > 0) {
             const char* content_type = "";
-            endpoint_patch_deployment(namespace, name, body, content_type, response_buffer, response_code);
+            endpoint_patch_deployment_etcd(namespace, name, body, content_type, response_buffer, response_code);
             return 0;
         }
         
         if (strcmp(method, "DELETE") == 0 && strlen(name) > 0) {
-            endpoint_delete_deployment(namespace, name, response_buffer, response_code);
+            endpoint_delete_deployment_etcd(namespace, name, response_buffer, response_code);
             return 0;
         }
     }
 
-    // Namespace endpoints
-    if (strstr(path, "/api/v1") && strstr(path, "/namespaces")) {
+    // StatefulSet endpoints (apps/v1)
+    if (strstr(path, "/apis/apps/v1") && strstr(path, "/statefulsets")) {
+        char namespace[256] = {0};
         char name[256] = {0};
         
         const char* ns_part = strstr(path, "/namespaces/");
-        if (ns_part && strlen(ns_part) > strlen("/namespaces/")) {
-            const char* name_start = ns_part + strlen("/namespaces/");
+        if (ns_part) {
+            const char* ns_start = ns_part + strlen("/namespaces/");
+            const char* ns_end = strchr(ns_start, '/');
+            if (ns_end) {
+                int len = ns_end - ns_start;
+                strncpy(namespace, ns_start, len > 255 ? 255 : len);
+            }
+        } else {
+            strcpy(namespace, "default");
+        }
+        
+        const char* ss_part = strstr(path, "/statefulsets/");
+        if (ss_part && strlen(ss_part) > strlen("/statefulsets/")) {
+            const char* name_start = ss_part + strlen("/statefulsets/");
             const char* name_end = strchr(name_start, '?');
             if (name_end) {
                 int len = name_end - name_start;
@@ -720,21 +848,131 @@ int api_handle_request(const char* method, const char* path, const char* body,
         
         if (strcmp(method, "GET") == 0) {
             if (strlen(name) > 0) {
-                endpoint_get_namespace(name, response_buffer, response_code);
+                endpoint_get_statefulset_etcd(namespace, name, response_buffer, response_code);
             } else {
-                endpoint_list_namespaces(response_buffer, response_code);
+                endpoint_list_statefulsets_etcd(namespace, response_buffer, response_code);
             }
             return 0;
         }
         
         if (strcmp(method, "POST") == 0) {
-            endpoint_create_namespace(body, response_buffer, response_code);
+            endpoint_create_statefulset_etcd(namespace, body, response_buffer, response_code);
             return 0;
         }
         
         if (strcmp(method, "DELETE") == 0 && strlen(name) > 0) {
-            endpoint_delete_namespace(name, response_buffer, response_code);
+            endpoint_delete_statefulset_etcd(namespace, name, response_buffer, response_code);
             return 0;
+        }
+    }
+
+    // Job endpoints (batch/v1)
+    if (strstr(path, "/apis/batch/v1") && strstr(path, "/jobs")) {
+        char namespace[256] = {0};
+        char name[256] = {0};
+        
+        const char* ns_part = strstr(path, "/namespaces/");
+        if (ns_part) {
+            const char* ns_start = ns_part + strlen("/namespaces/");
+            const char* ns_end = strchr(ns_start, '/');
+            if (ns_end) {
+                int len = ns_end - ns_start;
+                strncpy(namespace, ns_start, len > 255 ? 255 : len);
+            }
+        } else {
+            strcpy(namespace, "default");
+        }
+        
+        const char* job_part = strstr(path, "/jobs/");
+        if (job_part && strlen(job_part) > strlen("/jobs/")) {
+            const char* name_start = job_part + strlen("/jobs/");
+            const char* name_end = strchr(name_start, '?');
+            if (name_end) {
+                int len = name_end - name_start;
+                strncpy(name, name_start, len > 255 ? 255 : len);
+            } else {
+                strncpy(name, name_start, 255);
+            }
+        }
+        
+        if (strcmp(method, "GET") == 0) {
+            if (strlen(name) > 0) {
+                endpoint_get_job_etcd(namespace, name, response_buffer, response_code);
+            } else {
+                endpoint_list_jobs_etcd(namespace, response_buffer, response_code);
+            }
+            return 0;
+        }
+        
+        if (strcmp(method, "POST") == 0) {
+            endpoint_create_job_etcd(namespace, body, response_buffer, response_code);
+            return 0;
+        }
+        
+        if (strcmp(method, "DELETE") == 0 && strlen(name) > 0) {
+            endpoint_delete_job_etcd(namespace, name, response_buffer, response_code);
+            return 0;
+        }
+    }
+
+    // Namespace endpoints - MUST NOT match paths that have resources WITHIN a namespace
+    // Only match: /api/v1/namespaces or /api/v1/namespaces/{name}
+    // Do NOT match: /api/v1/namespaces/{name}/pods, /api/v1/namespaces/{name}/configmaps, etc.
+    if (strstr(path, "/api/v1") && strstr(path, "/namespaces")) {
+        // Check if this is a namespace-scoped resource (not the namespace endpoint itself)
+        // These patterns indicate a resource within a namespace:
+        // - /namespaces/{ns}/pods
+        // - /namespaces/{ns}/configmaps
+        // - /namespaces/{ns}/secrets
+        // - /namespaces/{ns}/services
+        // - etc.
+        if (strstr(path, "/namespaces/") && 
+            (strstr(path, "/pods") || strstr(path, "/configmaps") || strstr(path, "/secrets") ||
+             strstr(path, "/services") || strstr(path, "/deployments") || strstr(path, "/statefulsets") ||
+             strstr(path, "/jobs") || strstr(path, "/events"))) {
+            // This is a resource within a namespace, NOT a namespace endpoint
+            // Skip this handler and let the specific resource handler process it
+        } else {
+            // This is a namespace endpoint
+            char name[256] = {0};
+            
+            const char* ns_part = strstr(path, "/namespaces/");
+            if (ns_part && strlen(ns_part) > strlen("/namespaces/")) {
+                const char* name_start = ns_part + strlen("/namespaces/");
+                const char* name_end = strchr(name_start, '?');
+                if (name_end) {
+                    int len = name_end - name_start;
+                    strncpy(name, name_start, len > 255 ? 255 : len);
+                } else {
+                    // Also stop at next slash (in case of /namespaces/default/)
+                    const char* slash = strchr(name_start, '/');
+                    if (slash) {
+                        int len = slash - name_start;
+                        strncpy(name, name_start, len > 255 ? 255 : len);
+                    } else {
+                        strncpy(name, name_start, 255);
+                    }
+                }
+            }
+            
+            if (strcmp(method, "GET") == 0) {
+                if (strlen(name) > 0) {
+                    endpoint_get_namespace(name, response_buffer, response_code);
+                } else {
+                    endpoint_list_namespaces(response_buffer, response_code);
+                }
+                return 0;
+            }
+            
+            if (strcmp(method, "POST") == 0) {
+                endpoint_create_namespace(body, response_buffer, response_code);
+                return 0;
+            }
+            
+            if (strcmp(method, "DELETE") == 0 && strlen(name) > 0) {
+                endpoint_delete_namespace(name, response_buffer, response_code);
+                return 0;
+            }
         }
     }
 
@@ -772,26 +1010,27 @@ int api_handle_request(const char* method, const char* path, const char* body,
         
         if (strcmp(method, "GET") == 0) {
             if (strlen(name) > 0) {
-                endpoint_get_configmap(namespace, name, response_buffer, response_code);
+                endpoint_get_configmap_etcd(namespace, name, response_buffer, response_code);
             } else {
-                endpoint_list_configmaps(namespace, response_buffer, response_code);
+                endpoint_list_configmaps_etcd(namespace, response_buffer, response_code);
             }
             return 0;
         }
         
         if (strcmp(method, "POST") == 0) {
-            endpoint_create_configmap(namespace, body, response_buffer, response_code);
+            endpoint_create_configmap_etcd(namespace, body, response_buffer, response_code);
             return 0;
         }
         
         if (strcmp(method, "PATCH") == 0 && strlen(name) > 0) {
-            const char* content_type = "";
-            endpoint_patch_configmap(namespace, name, body, content_type, response_buffer, response_code);
+            // PATCH /configmaps/{name}
+            const char* content_type = "";  // Would be extracted from headers in real implementation
+            endpoint_patch_configmap_etcd(namespace, name, body, content_type, response_buffer, response_code);
             return 0;
         }
         
         if (strcmp(method, "DELETE") == 0 && strlen(name) > 0) {
-            endpoint_delete_configmap(namespace, name, response_buffer, response_code);
+            endpoint_delete_configmap_etcd(namespace, name, response_buffer, response_code);
             return 0;
         }
     }
@@ -830,26 +1069,127 @@ int api_handle_request(const char* method, const char* path, const char* body,
         
         if (strcmp(method, "GET") == 0) {
             if (strlen(name) > 0) {
-                endpoint_get_secret(namespace, name, response_buffer, response_code);
+                endpoint_get_secret_etcd(namespace, name, response_buffer, response_code);
             } else {
-                endpoint_list_secrets(namespace, response_buffer, response_code);
+                endpoint_list_secrets_etcd(namespace, response_buffer, response_code);
             }
             return 0;
         }
         
         if (strcmp(method, "POST") == 0) {
-            endpoint_create_secret(namespace, body, response_buffer, response_code);
+            endpoint_create_secret_etcd(namespace, body, response_buffer, response_code);
             return 0;
         }
         
         if (strcmp(method, "PATCH") == 0 && strlen(name) > 0) {
-            const char* content_type = "";
-            endpoint_patch_secret(namespace, name, body, content_type, response_buffer, response_code);
+            // PATCH /secrets/{name}
+            const char* content_type = "";  // Would be extracted from headers in real implementation
+            endpoint_patch_secret_etcd(namespace, name, body, content_type, response_buffer, response_code);
             return 0;
         }
         
         if (strcmp(method, "DELETE") == 0 && strlen(name) > 0) {
-            endpoint_delete_secret(namespace, name, response_buffer, response_code);
+            endpoint_delete_secret_etcd(namespace, name, response_buffer, response_code);
+            return 0;
+        }
+    }
+
+
+    // PersistentVolume endpoints
+    if (strstr(path, "/api/v1") && strstr(path, "/persistentvolumes")) {
+        char name[256] = {0};
+        
+        const char* pv_part = strstr(path, "/persistentvolumes/");
+        if (pv_part && strlen(pv_part) > strlen("/persistentvolumes/")) {
+            const char* name_start = pv_part + strlen("/persistentvolumes/");
+            const char* name_end = strchr(name_start, '?');
+            if (name_end) {
+                int len = name_end - name_start;
+                strncpy(name, name_start, len > 255 ? 255 : len);
+            } else {
+                strncpy(name, name_start, 255);
+            }
+        }
+        
+        if (strcmp(method, "GET") == 0) {
+            if (strlen(name) > 0) {
+                endpoint_get_pv_etcd(name, response_buffer, response_code);
+            } else {
+                endpoint_list_pv_etcd(response_buffer, response_code);
+            }
+            return 0;
+        }
+        
+        if (strcmp(method, "POST") == 0) {
+            endpoint_create_pv_etcd(body, response_buffer, response_code);
+            return 0;
+        }
+        
+        if (strcmp(method, "PATCH") == 0 && strlen(name) > 0) {
+            // PATCH /persistentvolumes/{name}
+            const char* content_type = "";  // Would be extracted from headers in real implementation
+            endpoint_patch_pv_etcd(name, body, content_type, response_buffer, response_code);
+            return 0;
+        }
+        
+        if (strcmp(method, "DELETE") == 0 && strlen(name) > 0) {
+            endpoint_delete_pv_etcd(name, response_buffer, response_code);
+            return 0;
+        }
+    }
+
+    // PersistentVolumeClaim endpoints
+    if (strstr(path, "/api/v1") && strstr(path, "/persistentvolumeclaims")) {
+        char namespace[256] = {0};
+        char name[256] = {0};
+        
+        const char* ns_part = strstr(path, "/namespaces/");
+        if (ns_part) {
+            const char* ns_start = ns_part + strlen("/namespaces/");
+            const char* ns_end = strchr(ns_start, '/');
+            if (ns_end) {
+                int len = ns_end - ns_start;
+                strncpy(namespace, ns_start, len > 255 ? 255 : len);
+            }
+        } else {
+            strcpy(namespace, "default");
+        }
+        
+        const char* pvc_part = strstr(path, "/persistentvolumeclaims/");
+        if (pvc_part && strlen(pvc_part) > strlen("/persistentvolumeclaims/")) {
+            const char* name_start = pvc_part + strlen("/persistentvolumeclaims/");
+            const char* name_end = strchr(name_start, '?');
+            if (name_end) {
+                int len = name_end - name_start;
+                strncpy(name, name_start, len > 255 ? 255 : len);
+            } else {
+                strncpy(name, name_start, 255);
+            }
+        }
+        
+        if (strcmp(method, "GET") == 0) {
+            if (strlen(name) > 0) {
+                endpoint_get_pvc_etcd(namespace, name, response_buffer, response_code);
+            } else {
+                endpoint_list_pvc_etcd(namespace, response_buffer, response_code);
+            }
+            return 0;
+        }
+        
+        if (strcmp(method, "POST") == 0) {
+            endpoint_create_pvc_etcd(namespace, body, response_buffer, response_code);
+            return 0;
+        }
+        
+        if (strcmp(method, "PATCH") == 0 && strlen(name) > 0) {
+            // PATCH /persistentvolumeclaims/{name}
+            const char* content_type = "";  // Would be extracted from headers in real implementation
+            endpoint_patch_pvc_etcd(namespace, name, body, content_type, response_buffer, response_code);
+            return 0;
+        }
+        
+        if (strcmp(method, "DELETE") == 0 && strlen(name) > 0) {
+            endpoint_delete_pvc_etcd(namespace, name, response_buffer, response_code);
             return 0;
         }
     }

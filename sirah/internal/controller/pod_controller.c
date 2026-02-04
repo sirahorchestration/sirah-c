@@ -637,13 +637,13 @@ int pod_controller_run(void) {
     return 0;
 }
 
-// Callback to add pod to controller (now unused - controller fetches from API)
-int pod_controller_add_pod(const char* namespace, const char* name,
-                          const char* image, int memory_mb) {
-    fprintf(stderr, "[POD CONTROLLER] ADD POD DEPRECATED: Controller now fetches from API\n");
-    fflush(stderr);
-    return 0;
-}
+// DEPRECATED: Callback to add pod to controller (now unused - controller fetches from API)
+// int pod_controller_add_pod(const char* namespace, const char* name,
+//                           const char* image, int memory_mb) {
+//     fprintf(stderr, "[POD CONTROLLER] ADD POD DEPRECATED: Controller now fetches from API\n");
+//     fflush(stderr);
+//     return 0;
+// }
 
 void pod_controller_shutdown(void) {
     printf("[Pod Controller] Shutting down...\n");

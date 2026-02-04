@@ -1,0 +1,91 @@
+# Binaries
+bin/
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test coverage
+*.out
+coverage.html
+
+# Go
+*.test
+*.prof
+go.work
+go.work.sum
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Unikernel builds
+*.img
+*.iso
+*.qcow2
+*.vmdk
+*.vhd
+*.raw
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.log
+
+# Build artifacts
+components/*/bin/
+components/*/build/
+tools/*/bin/
+
+# Kubernetes configs
+*.kubeconfig
+kubeconfig-*
+
+# Certificates and keys
+*.key
+*.crt
+*.pem
+*.p12
+*.pfx
+
+# etcd data
+*.etcd/
+etcd-data/
+
+# Node modules (if any)
+node_modules/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+ENV/
+
+# OS
+Thumbs.db
+.directory
+
+# CI/CD
+.github/workflows/*.log
+
+# Documentation builds
+docs/_build/
+docs/.doctrees/
+
+# Local testing
+local-cluster/
+test-cluster/
+
+# Sensitive data
+secrets/
+credentials/
+.env
+.env.local

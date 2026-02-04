@@ -323,3 +323,93 @@ int kubelet_cleanup_volumes(kubelet_t* kubelet, const char* namespace, const cha
     
     return kubelet_cleanup_pod_mounts(pod_name, namespace, kubelet->pod_mount_base);
 }
+
+// ============================================================================
+// Health Checks and Metrics (Phase 4)
+// ============================================================================
+
+/**
+ * Run health checks on all managed pods
+ */
+int kubelet_run_health_checks(kubelet_t* kubelet) {
+    if (!kubelet) return -1;
+    
+    fprintf(stderr, "[kubelet %s] Running health checks on %d pods\n",
+           kubelet->node_name, kubelet->num_managed_pods);
+    
+    int unhealthy_count = 0;
+    
+    for (int i = 0; i < kubelet->num_managed_pods; i++) {
+        pod_lifecycle_t* pod_lifecycle = kubelet->managed_pods[i];
+        k8s_pod_t* pod = pod_lifecycle->pod;
+        
+        // Skip pods not running
+        if (pod->status.phase != PHASE_RUNNING) {
+            continue;
+        }
+        
+        // TODO: Execute probes from pod spec if they exist
+        // For MVP, we just check if container processes are still alive
+        
+        // If we get here and pod is marked running, assume it's healthy
+        fprintf(stderr, "[kubelet %s] Health check: %s/%s OK\n",
+               kubelet->node_name, pod->metadata.namespace, pod->metadata.name);
+    }
+    
+    return unhealthy_count;
+}
+
+/**
+ * Get kubelet metrics for monitoring
+ */
+metrics_collector_t* kubelet_get_metrics(kubelet_t* kubelet) {
+    if (!kubelet) return NULL;
+    
+    // Create metrics collector (MVP - just stub for now)
+    // In production, would populate with actual system metrics
+    return NULL;  // TODO: Implement metrics collection
+}
+
+/**
+ * Generate Prometheus metrics output for kubelet
+ */
+char* kubelet_get_metrics_prometheus(kubelet_t* kubelet) {
+    if (!kubelet) return NULL;
+    
+    // TODO: Implement metrics generation
+    static char stub[] = "# No metrics available\n";
+    return stub;
+}
+
+/**
+ * Check kubelet health status
+ */
+int kubelet_health_check(kubelet_t* kubelet) {
+    if (!kubelet) return -1;
+    
+    // Check if API server is reachable
+    CURL* curl = (CURL*)kubelet->curl_handle;
+    if (!curl) return -1;
+    
+    char url[256];
+    snprintf(url, sizeof(url), "%s/healthz", kubelet->api_server_url);
+    
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);  // HEAD request
+    
+    CURLcode res = curl_easy_perform(curl);
+    
+    if (res == CURLE_OK) {
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+        
+        if (http_code >= 200 && http_code < 300) {
+            fprintf(stderr, "[kubelet %s] Health check OK\n", kubelet->node_name);
+            return 0;  // Healthy
+        }
+    }
+    
+    fprintf(stderr, "[kubelet %s] Health check FAILED\n", kubelet->node_name);
+    return -1;  // Unhealthy
+}

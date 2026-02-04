@@ -6,14 +6,7 @@
 // Forward declare etcd client
 typedef struct etcd_client etcd_client_t;
 
-// Pod store structure definition
-typedef struct {
-    k8s_pod_t* pods[1000];
-    int count;
-} pod_store_t;
-
-// External pod store for apiserver and controller access
-extern pod_store_t pod_store;
+// Pod store removed - using etcd for all storage
 
 // Global etcd client for persistent storage
 extern etcd_client_t* g_etcd_client;

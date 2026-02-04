@@ -65,8 +65,8 @@ int pod_log_write(const char* namespace, const char* pod_name,
     mkdir(LOG_STORE_DIR, 0755);
     
     // Build log file path: /tmp/sirah-logs/pods/{namespace}/{pod_name}/{container_name}.log
-    char dir_path[512];
-    char file_path[512];
+    char dir_path[1024];
+    char file_path[1024];
     
     snprintf(dir_path, sizeof(dir_path), "%s/%s/%s", LOG_STORE_DIR, namespace, pod_name);
     snprintf(file_path, sizeof(file_path), "%s/%s.log", dir_path, container_name);
@@ -91,7 +91,7 @@ int pod_log_write(const char* namespace, const char* pod_name,
 // Clear logs
 int pod_log_clear(const char* namespace, const char* pod_name) {
     // Delete log files for this pod
-    char dir_path[512];
+    char dir_path[1024];
     snprintf(dir_path, sizeof(dir_path), "%s/%s/%s", LOG_STORE_DIR, namespace, pod_name);
     
     // For now, just succeed (would need recursive delete in production)
@@ -103,15 +103,15 @@ int endpoint_get_pod_logs(const char* namespace, const char* pod_name,
                           const char* container_name, log_query_params_t* params,
                           char* response_buffer, int* response_code) {
     // Build log file path
-    char file_path[512];
+    char file_path[1024];
     snprintf(file_path, sizeof(file_path), "%s/%s/%s/%s.log", 
              LOG_STORE_DIR, namespace, pod_name, container_name);
     
     // Try to read log file
     FILE* fp = fopen(file_path, "r");
     if (!fp) {
-        // No logs yet - return empty response
-        response_buffer[0] = '\0';
+        // No logs yet - return empty string (plain text response)
+        strcpy(response_buffer, "");
         *response_code = 200;
         return 0;
     }
