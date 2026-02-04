@@ -156,6 +156,8 @@ make test-e2e
 make conformance
 ```
 
+**Conformance Testing**: We use [Sonobuoy](https://sonobuoy.io/) for Kubernetes conformance validation, ensuring API compatibility with official Kubernetes specifications.
+
 ## Community
 
 - **Issues**: Report bugs and request features
