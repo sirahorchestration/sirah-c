@@ -66,6 +66,7 @@ char* k8s_pod_to_json(k8s_pod_t* pod) {
     json_object_object_add(meta, "name", json_object_new_string(pod->metadata.name));
     json_object_object_add(meta, "namespace", json_object_new_string(pod->metadata.namespace));
     json_object_object_add(meta, "uid", json_object_new_string(pod->metadata.uid ? pod->metadata.uid : ""));
+    json_object_object_add(meta, "resourceVersion", json_object_new_string(pod->metadata.resource_version ? pod->metadata.resource_version : ""));
     json_object_object_add(root, "metadata", meta);
     
     // Spec
@@ -108,12 +109,18 @@ char* k8s_pod_to_json(k8s_pod_t* pod) {
         json_object_object_add(cs, "ready", json_object_new_boolean(pod->status.container_statuses[i].state == PHASE_RUNNING));
         json_object_object_add(cs, "restartCount", json_object_new_int(0));
         
+        // Properly structured state object
         json_object* state = json_object_new_object();
-        const char* state_str = "waiting";
-        if (pod->status.container_statuses[i].state == PHASE_RUNNING) state_str = "running";
-        json_object* state_obj = json_object_new_object();
-        json_object_object_add(state_obj, state_str, json_object_new_null());
-        json_object_object_add(cs, "state", state_obj);
+        if (pod->status.container_statuses[i].state == PHASE_RUNNING) {
+            // Running state
+            json_object_object_add(state, "running", json_object_new_object());
+        } else {
+            // Waiting state with reason
+            json_object* waiting_obj = json_object_new_object();
+            json_object_object_add(waiting_obj, "reason", json_object_new_string("ContainerCreating"));
+            json_object_object_add(state, "waiting", waiting_obj);
+        }
+        json_object_object_add(cs, "state", state);
         
         json_object_array_add(container_statuses, cs);
     }
@@ -142,6 +149,19 @@ k8s_pod_t* k8s_pod_from_json(const char* json_str) {
     const char* ns = json_object_get_string(json_object_object_get(meta, "namespace"));
     
     k8s_pod_t* pod = k8s_pod_new(name ? name : "unnamed", ns ? ns : "default");
+    
+    // Parse metadata fields
+    const char* uid = json_object_get_string(json_object_object_get(meta, "uid"));
+    if (uid) {
+        free(pod->metadata.uid);
+        pod->metadata.uid = strdup(uid);
+    }
+    
+    const char* resource_version = json_object_get_string(json_object_object_get(meta, "resourceVersion"));
+    if (resource_version) {
+        free(pod->metadata.resource_version);
+        pod->metadata.resource_version = strdup(resource_version);
+    }
     
     json_object* spec = json_object_object_get(root, "spec");
     if (spec) {

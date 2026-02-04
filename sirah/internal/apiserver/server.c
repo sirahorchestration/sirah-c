@@ -64,8 +64,8 @@ static enum MHD_Result request_callback(void* cls,
         state->processed = 0;
         *con_cls = (void*)state;
         
-        // Return MHD_YES to continue receiving data for POST/PUT requests
-        if (strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0) {
+        // Return MHD_YES to continue receiving data for methods that have a body
+        if (strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0 || strcmp(method, "PATCH") == 0) {
             return MHD_YES;
         }
     }
@@ -101,8 +101,31 @@ static enum MHD_Result request_callback(void* cls,
     
     int response_code = 200;
 
-    // Route the request with the accumulated body
-    api_handle_request(method, url, state->body, response_body, &response_code);
+    // Check Accept header - we only support JSON
+    // According to HTTP RFC 7231 and Kubernetes KEP-555:
+    // If client requests a format we don't support, return 406 Not Acceptable.
+    // 
+    // Note: kubectl 1.28+ prefers protobuf encoding for efficiency, requesting it in Accept header.
+    // Since Sirah only supports JSON, we return 406 to signal incompatibility.
+    // kubectl should then retry with application/json.
+    
+    const char* accept_header = MHD_lookup_connection_value(connection, MHD_HEADER_KIND, "Accept");
+    
+    if (accept_header != NULL && 
+        strstr(accept_header, "application/vnd.kubernetes.protobuf") != NULL) {
+        // Client explicitly requested protobuf, but we only support JSON
+        // Return 406 Not Acceptable so client knows to retry with JSON
+        response_code = 406;  // Not Acceptable
+        snprintf(response_body, 16384, 
+            "{\"kind\":\"Status\",\"apiVersion\":\"v1\",\"metadata\":{},\"status\":\"Failure\","
+            "\"message\":\"The API server does not support protobuf encoding (application/vnd.kubernetes.protobuf). "
+            "Only application/json is supported. Please use a client configured for JSON encoding.\","
+            "\"reason\":\"NotAcceptable\","
+            "\"code\":406}");
+    } else {
+        // Route the request with the accumulated body
+        api_handle_request(method, url, state->body, response_body, &response_code);
+    }
 
     // Create response - use MHD_RESPMEM_MUST_FREE since we malloc'd it
     struct MHD_Response* response = MHD_create_response_from_buffer(
@@ -118,7 +141,13 @@ static enum MHD_Result request_callback(void* cls,
         return MHD_NO;
     }
 
-    MHD_add_response_header(response, "Content-Type", "application/json");
+    // Determine Content-Type based on request path
+    // Log endpoints return raw stream without structured content-type
+    // Other endpoints return JSON
+    if (strstr(url, "/log") == NULL) {
+        MHD_add_response_header(response, "Content-Type", "application/json");
+    }
+    // For log endpoints, don't set Content-Type - just return raw logs
     enum MHD_Result ret = MHD_queue_response(connection, response_code, response);
     MHD_destroy_response(response);
     

@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: status-test-pod
+spec:
+  containers:
+  - name: app
+    image: /tmp/sirah-unikernels/test-kernel.img

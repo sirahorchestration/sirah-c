@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-config
+  namespace: default
+data:
+  app.conf: |
+    debug=true
+    port=8080
+  version: "1.0.0"

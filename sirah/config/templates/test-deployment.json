@@ -1,0 +1,27 @@
+{
+  "metadata": {
+    "name": "nginx-deployment",
+    "namespace": "default"
+  },
+  "spec": {
+    "replicas": 2,
+    "selector": {
+      "app": "nginx"
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app": "nginx"
+        }
+      },
+      "spec": {
+        "containers": [
+          {
+            "name": "test",
+            "image": "/tmp/sirah-unikernels/test-kernel.img"
+          }
+        ]
+      }
+    }
+  }
+}

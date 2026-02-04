@@ -5,6 +5,9 @@
 #include "../../pkg/lifecycle/pod_lifecycle.h"
 #include "volumes.h"
 #include "unikernel_runtime.h"
+#include "health_probe.h"
+#include "metrics.h"
+#include "kubelet_lifecycle.h"
 #include <time.h>
 
 // Kubelet represents a node agent
@@ -21,10 +24,19 @@ typedef struct {
     // Unikernel runtime for pod execution (QEMU backend)
     void* runtime;        // unikernel_runtime_t*
     
-    // Managed pods
+    // Managed pods - new lifecycle model
+    pod_container_state_t** pod_states;
+    int num_pod_states;
+    
+    // Legacy pod tracking (maintained for compatibility)
     pod_lifecycle_t** managed_pods;
     int num_managed_pods;
+    
+    // Metrics collector
+    metrics_collector_t* metrics;
+    
     time_t last_sync;
+    time_t last_health_check;
 } kubelet_t;
 
 // Kubelet operations
@@ -57,5 +69,29 @@ int kubelet_mount_pod_volumes(kubelet_t* kubelet, const char* namespace, const c
 
 // Clean up pod volumes
 int kubelet_cleanup_volumes(kubelet_t* kubelet, const char* namespace, const char* pod_name);
+
+// ============================================================================
+// Health & Metrics (Phase 4)
+// ============================================================================
+
+/**
+ * Execute health checks on all managed pods
+ */
+int kubelet_run_health_checks(kubelet_t* kubelet);
+
+/**
+ * Get kubelet metrics for monitoring
+ */
+metrics_collector_t* kubelet_get_metrics(kubelet_t* kubelet);
+
+/**
+ * Generate Prometheus metrics output
+ */
+char* kubelet_get_metrics_prometheus(kubelet_t* kubelet);
+
+/**
+ * Check kubelet health status
+ */
+int kubelet_health_check(kubelet_t* kubelet);
 
 #endif

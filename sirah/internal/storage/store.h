@@ -3,6 +3,14 @@
 
 #include "../../pkg/types/pod.h"
 
+// Forward declare etcd client
+typedef struct etcd_client etcd_client_t;
+
+// Pod store removed - using etcd for all storage
+
+// Global etcd client for persistent storage
+extern etcd_client_t* g_etcd_client;
+
 typedef struct store {
     void* backend;
     int (*put)(void* backend, const char* key, const char* value);
@@ -13,5 +21,11 @@ typedef struct store {
 int store_put_pod(store_t* s, k8s_pod_t* pod);
 k8s_pod_t* store_get_pod(store_t* s, const char* namespace, const char* name);
 int store_delete_pod(store_t* s, const char* namespace, const char* name);
+
+// Initialize etcd-backed storage
+int store_init_etcd(const char* etcd_addr);
+
+// Shutdown etcd connection
+void store_shutdown_etcd(void);
 
 #endif // SIRAH_STORAGE_STORE_H

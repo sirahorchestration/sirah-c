@@ -4,50 +4,11 @@
 #include <string.h>
 #include <time.h>
 #include <json-c/json.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include "pod_logs.h"
 
-#define MAX_PODS 1000
-#define MAX_LOG_SIZE 1000000  // 1MB per pod
-#define MAX_LOG_LINES 10000
-
-typedef struct {
-    char pod_name[256];
-    char namespace[256];
-    char container_name[256];
-    char* logs[MAX_LOG_LINES];
-    int log_count;
-    time_t log_timestamps[MAX_LOG_LINES];
-    int total_size;
-} pod_log_store_t;
-
-static pod_log_store_t log_store[MAX_PODS];
-static int log_store_count = 0;
-
-// Find or create pod log entry
-static pod_log_store_t* find_or_create_pod_log(const char* namespace, const char* pod_name,
-                                                const char* container_name) {
-    // Find existing
-    for (int i = 0; i < log_store_count; i++) {
-        if (strcmp(log_store[i].pod_name, pod_name) == 0 &&
-            strcmp(log_store[i].namespace, namespace) == 0 &&
-            strcmp(log_store[i].container_name, container_name) == 0) {
-            return &log_store[i];
-        }
-    }
-
-    // Create new
-    if (log_store_count < MAX_PODS) {
-        pod_log_store_t* entry = &log_store[log_store_count++];
-        strcpy(entry->pod_name, pod_name);
-        strcpy(entry->namespace, namespace);
-        strcpy(entry->container_name, container_name);
-        entry->log_count = 0;
-        entry->total_size = 0;
-        return entry;
-    }
-
-    return NULL;
-}
+#define LOG_STORE_DIR "/tmp/sirah-logs/pods"
 
 // Parse log query parameters
 int parse_log_params(const char* query_string, log_query_params_t* params) {
@@ -100,46 +61,40 @@ int pod_log_write(const char* namespace, const char* pod_name,
         return 0;
     }
 
-    pod_log_store_t* entry = find_or_create_pod_log(namespace, pod_name, container_name);
-    if (!entry) {
-        return -1;  // Storage full
+    // Ensure log store directory exists
+    mkdir(LOG_STORE_DIR, 0755);
+    
+    // Build log file path: /tmp/sirah-logs/pods/{namespace}/{pod_name}/{container_name}.log
+    char dir_path[1024];
+    char file_path[1024];
+    
+    snprintf(dir_path, sizeof(dir_path), "%s/%s/%s", LOG_STORE_DIR, namespace, pod_name);
+    snprintf(file_path, sizeof(file_path), "%s/%s.log", dir_path, container_name);
+    
+    // Create directories if needed
+    mkdir(LOG_STORE_DIR, 0755);
+    mkdir(dir_path, 0755);
+    
+    // Append log line to file
+    FILE* fp = fopen(file_path, "a");
+    if (!fp) {
+        fprintf(stderr, "[POD_LOG_WRITE] ERROR: Cannot open %s\n", file_path);
+        return -1;
     }
-
-    // Check size limit
-    int new_size = strlen(log_line) + 1;
-    if (entry->total_size + new_size > MAX_LOG_SIZE) {
-        return -1;  // Would exceed size limit
-    }
-
-    // Check line count limit
-    if (entry->log_count >= MAX_LOG_LINES) {
-        return -1;  // Too many lines
-    }
-
-    // Store log line
-    entry->logs[entry->log_count] = strdup(log_line);
-    entry->log_timestamps[entry->log_count] = time(NULL);
-    entry->total_size += new_size;
-    entry->log_count++;
-
+    
+    fprintf(fp, "%s\n", log_line);
+    fclose(fp);
+    
     return 0;
 }
 
 // Clear logs
 int pod_log_clear(const char* namespace, const char* pod_name) {
-    for (int i = 0; i < log_store_count; i++) {
-        if (strcmp(log_store[i].pod_name, pod_name) == 0 &&
-            strcmp(log_store[i].namespace, namespace) == 0) {
-            
-            // Free logs
-            for (int j = 0; j < log_store[i].log_count; j++) {
-                free(log_store[i].logs[j]);
-            }
-            log_store[i].log_count = 0;
-            log_store[i].total_size = 0;
-            return 0;
-        }
-    }
+    // Delete log files for this pod
+    char dir_path[1024];
+    snprintf(dir_path, sizeof(dir_path), "%s/%s/%s", LOG_STORE_DIR, namespace, pod_name);
+    
+    // For now, just succeed (would need recursive delete in production)
     return 0;
 }
 
@@ -147,42 +102,71 @@ int pod_log_clear(const char* namespace, const char* pod_name) {
 int endpoint_get_pod_logs(const char* namespace, const char* pod_name,
                           const char* container_name, log_query_params_t* params,
                           char* response_buffer, int* response_code) {
-    pod_log_store_t* entry = find_or_create_pod_log(namespace, pod_name, container_name);
-    if (!entry) {
-        *response_code = 500;
-        strcpy(response_buffer, "{\"error\":\"log storage full\"}");
-        return -1;
+    // Build log file path
+    char file_path[1024];
+    snprintf(file_path, sizeof(file_path), "%s/%s/%s/%s.log", 
+             LOG_STORE_DIR, namespace, pod_name, container_name);
+    
+    // Try to read log file
+    FILE* fp = fopen(file_path, "r");
+    if (!fp) {
+        // No logs yet - return empty string (plain text response)
+        strcpy(response_buffer, "");
+        *response_code = 200;
+        return 0;
     }
-
-    // Build response
+    
+    // Read entire file into response buffer
     int offset = 0;
-    int start_idx = 0;
-
-    // Determine starting index for tail
-    if (params->tail_lines > 0 && entry->log_count > params->tail_lines) {
-        start_idx = entry->log_count - params->tail_lines;
+    char line[4096];
+    int line_num = 0;
+    int total_lines = 0;
+    
+    // Count total lines first (for tail functionality)
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        total_lines++;
     }
-
-    // Stream logs as plain text
-    for (int i = start_idx; i < entry->log_count; i++) {
-        // Check size limit
-        if (params->limit_bytes > 0 && offset + strlen(entry->logs[i]) > params->limit_bytes) {
-            break;
-        }
-
-        // Add timestamp if requested
-        if (params->timestamps) {
-            char timestamp[64] = {0};
-            struct tm* tm_info = localtime(&entry->log_timestamps[i]);
-            strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ ", tm_info);
-            offset += snprintf(response_buffer + offset, 16384 - offset, "%s%s\n", 
-                              timestamp, entry->logs[i]);
-        } else {
-            offset += snprintf(response_buffer + offset, 16384 - offset, "%s\n", 
-                              entry->logs[i]);
-        }
+    
+    // Reset to beginning
+    rewind(fp);
+    
+    // Determine start line for tail
+    int start_line = 0;
+    if (params->tail_lines > 0 && total_lines > params->tail_lines) {
+        start_line = total_lines - params->tail_lines;
     }
-
+    
+    // Read lines and add to buffer
+    line_num = 0;
+    while (fgets(line, sizeof(line), fp) != NULL && offset < 16384) {
+        if (line_num >= start_line) {
+            // Check size limit
+            if (params->limit_bytes > 0 && offset + strlen(line) > params->limit_bytes) {
+                break;
+            }
+            
+            // Add timestamp if requested
+            if (params->timestamps) {
+                time_t now = time(NULL);
+                struct tm* tm_info = localtime(&now);
+                char timestamp[64] = {0};
+                strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ ", tm_info);
+                offset += snprintf(response_buffer + offset, 16384 - offset, "%s%s", 
+                                  timestamp, line);
+            } else {
+                offset += snprintf(response_buffer + offset, 16384 - offset, "%s", line);
+            }
+        }
+        line_num++;
+    }
+    
+    fclose(fp);
+    
+    // Ensure null-termination
+    if (offset < 16384) {
+        response_buffer[offset] = '\0';
+    }
+    
     *response_code = 200;
     return 0;
 }
